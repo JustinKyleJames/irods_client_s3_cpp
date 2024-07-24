@@ -30,7 +30,7 @@
         },
 
         "region": "us-east-1",
-        "multipart_upload_part_files_directory": "/tmp",
+        "multipart_upload_part_files_directory": "/diskb/tmp",
         "authentication": {
             "eviction_check_interval_in_seconds": 60,
 
@@ -40,13 +40,13 @@
         },
 
         "requests": {
-            "threads": 10,
+            "threads": 30,
             "max_size_of_request_body_in_bytes": 1000000000,
             "timeout_in_seconds": 300 
         },
 
         "background_io": {
-            "threads": 10 
+            "threads": 30 
         }
 
     },
@@ -78,9 +78,9 @@
             "refresh_when_resource_changes_detected": true
         },
 
-        "resource": "demoResc",
+        "resource": "resc1",
 
-        "put_object_buffer_size_in_bytes": 4096,
-        "get_object_buffer_size_in_bytes": 4096 
+        "put_object_buffer_size_in_bytes": 32768,
+        "get_object_buffer_size_in_bytes": 32768
     }
 }

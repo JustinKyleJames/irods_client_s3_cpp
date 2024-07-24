@@ -42,6 +42,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         g++-11 \
         gcc \
         gcc-11 \
+        vim \
         irods-runtime=${irods_version} \
         irods-externals-clang-runtime13.0.0-0 \
     && \
@@ -65,4 +66,5 @@ USER ${s3_api_user}
 RUN mkdir /home/${s3_api_user}/.irods && \
     echo '{}' > /home/${s3_api_user}/.irods/irods_environment.json
 
-ENTRYPOINT ["irods_s3_api", "/config.json"]
+#ENTRYPOINT ["irods_s3_api", "/config.json"]
+ENTRYPOINT ["tail", "-f", "/dev/null"]

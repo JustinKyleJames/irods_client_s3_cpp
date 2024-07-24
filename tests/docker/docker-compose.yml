@@ -13,6 +13,8 @@ services:
             interval: 10s
             timeout: 10s
             retries: 20
+        volumes:
+            - /home/diskb:/diskb
 
     irods-s3-api:
         build:
@@ -20,6 +22,8 @@ services:
             dockerfile: irods_runner.Dockerfile
         volumes:
             - ./config.json:/config.json:ro
+            - /home/diskb:/diskb
+            - /home/jjames/github:/github
         ports:
             - "8080"
         depends_on:
