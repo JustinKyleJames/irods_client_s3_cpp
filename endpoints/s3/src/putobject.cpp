@@ -32,43 +32,6 @@ namespace beast = boost::beast;
 namespace fs = irods::experimental::filesystem;
 namespace logging = irods::http::logging;
 
-namespace irods::s3::api::multipart_global_state
-{
-	// This is a part size map which is shared between threads. Whenever part sizes are known
-	// they are added to this map. When complete or cancel multipart is executed, the part sizes
-	// for that upload_id are removed.
-	// The map looks like the following with the key of the first map being the upload_id and the
-	// key of the second map being the part number:
-	//    {
-	//      "1234abcd-1234-1234-123456789abc":
-	//        { 0: 4096000,
-	//          1: 4096000,
-	//          4: 4096000 },
-	//      "01234abc-0123-0123-0123456789ab":
-	//        { 0: 5192000,
-	//          3: 5192000 }
-	//    }
-	std::unordered_map<std::string, std::unordered_map<unsigned int, uint64_t>> part_size_map;
-
-	// This map holds persistent data needed for each upload_id. This includes the replica_token and
-	// replica_number.  In addition it holds shared pointers for the connection, transport, and odstream
-	// for the first stream that is opened. These shared pointers are saved to this map so that the first
-	// open() to an iRODS data object can remain open throughout the lifecycle of the request.  This
-	// stream will be closed in either CompleteMultipartUpload or AbortMultipartUpload.
-	std::unordered_map<
-		std::string,
-		std::tuple<
-			irods::experimental::io::replica_token,
-			irods::experimental::io::replica_number,
-			std::shared_ptr<irods::experimental::client_connection>,
-			std::shared_ptr<irods::experimental::io::client::native_transport>,
-			std::shared_ptr<irods::experimental::io::odstream>>>
-		replica_token_number_and_odstream_map;
-
-	// mutex to protect part_size_map
-	std::mutex multipart_global_state_mutex;
-} // end namespace irods::s3::api::multipart_global_state
-
 namespace
 {
 	const std::regex upload_id_pattern("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
@@ -146,7 +109,8 @@ class incremental_async_read : public std::enable_shared_from_this<incremental_a
 		, keep_dstream_open_flag{false}
 		, conn_{_conn}
 	{
-		namespace part_shmem = irods::s3::api::multipart_global_state;
+		namespace mpart_global_state = irods::s3::api::multipart_global_state;
+		mpart_global_state::print_multipart_global_state();
 
 		resp_.version(parser_->get().version());
 		resp_.set("Etag", _irods_path);
@@ -157,15 +121,16 @@ class incremental_async_read : public std::enable_shared_from_this<incremental_a
 
 		if (upload_part_flag_ && part_offset_is_known_) {
 			// we know the offset so seek and stream directly to iRODS
-			std::lock_guard<std::mutex> guard(part_shmem::multipart_global_state_mutex);
+			std::lock_guard<std::mutex> guard(mpart_global_state::multipart_global_state_mutex);
 
 			// if there is no replica token then just open the object without replica token and save the token
-			if (part_shmem::replica_token_number_and_odstream_map.find(upload_id_) ==
-			    part_shmem::replica_token_number_and_odstream_map.end())
+			if (mpart_global_state::replica_token_number_and_odstream_map.find(upload_id_) ==
+			    mpart_global_state::replica_token_number_and_odstream_map.end())
 			{
 				logging::trace(
-					"{}: Open new iRODS data object [{}] for writing and seeking to {}.",
+					"{}:{} Open new iRODS data object [{}] for writing and seeking to {}.",
 					__func__,
+					__LINE__,
 					irods_path_,
 					part_offset_);
 				odstream_->open(
@@ -176,23 +141,25 @@ class incremental_async_read : public std::enable_shared_from_this<incremental_a
 				if (odstream_->is_open()) {
 					// the first stream that opens will stay open until CompleteMultipartTransfer is called
 					keep_dstream_open_flag = true;
-					part_shmem::replica_token_number_and_odstream_map[upload_id_] = {
+					mpart_global_state::replica_token_number_and_odstream_map[upload_id_] = {
 						odstream_->replica_token(), odstream_->replica_number(), conn_, tp_, odstream_};
 				}
 			}
 			else {
 				// get the replica token and pass it to open
 				logging::trace(
-					"{}: Open iRODS data object[{}] for writing and seeking to {}.  Replica token={}",
+					"{}:{} Open iRODS data object[{}] for writing and seeking to {}.  Replica token={}",
 					__func__,
+					__LINE__,
 					irods_path_,
 					part_offset_,
-					std::get<0>(part_shmem::replica_token_number_and_odstream_map[upload_id_]).value);
+					std::get<0>(mpart_global_state::replica_token_number_and_odstream_map[upload_id_]).value);
 				odstream_->open(
 					*tp_,
-					std::get<0>(part_shmem::replica_token_number_and_odstream_map[upload_id_]), // replica token
+					std::get<0>(mpart_global_state::replica_token_number_and_odstream_map[upload_id_]), // replica token
 					irods_path_,
-					std::get<1>(part_shmem::replica_token_number_and_odstream_map[upload_id_]), // replica number
+					std::get<1>(
+						mpart_global_state::replica_token_number_and_odstream_map[upload_id_]), // replica number
 					std::ios::out | std::ios::in);
 			}
 
@@ -341,7 +308,7 @@ void irods::s3::actions::handle_putobject(
 	const boost::urls::url_view& url)
 {
 	using json_pointer = nlohmann::json::json_pointer;
-	namespace part_shmem = irods::s3::api::multipart_global_state;
+	namespace mpart_global_state = irods::s3::api::multipart_global_state;
 
 	beast::http::response<beast::http::empty_body> response;
 
@@ -479,11 +446,11 @@ void irods::s3::actions::handle_putobject(
 		// see if we have enough information to stream this part directly to iRODS
 		uint64_t part_size = 0;
 		{
-			std::lock_guard<std::mutex> guard(part_shmem::multipart_global_state_mutex);
+			std::lock_guard<std::mutex> guard(mpart_global_state::multipart_global_state_mutex);
 
 			// if an entry for upload id does not exist go ahead and create it
-			if (part_shmem::part_size_map.find(upload_id) == part_shmem::part_size_map.end()) {
-				part_shmem::part_size_map[upload_id] = std::unordered_map<unsigned int, uint64_t>();
+			if (mpart_global_state::part_size_map.find(upload_id) == mpart_global_state::part_size_map.end()) {
+				mpart_global_state::part_size_map[upload_id] = std::unordered_map<unsigned int, uint64_t>();
 			}
 			try {
 				// add this part size to part_size_map
@@ -496,9 +463,10 @@ void irods::s3::actions::handle_putobject(
 
 						// Make sure someone hasn't previously uploaded this part with a different part size.
 						// If so we can't handle that and have to reject the call.
-						if (part_shmem::part_size_map[upload_id].find(part_number_int) !=
-						    part_shmem::part_size_map[upload_id].end()) {
-							auto old_part_size = part_shmem::part_size_map[upload_id][part_number_int];
+						if (mpart_global_state::part_size_map[upload_id].find(part_number_int) !=
+						    mpart_global_state::part_size_map[upload_id].end())
+						{
+							auto old_part_size = mpart_global_state::part_size_map[upload_id][part_number_int];
 							if (old_part_size != part_size) {
 								// reject this
 								logging::error(
@@ -517,7 +485,7 @@ void irods::s3::actions::handle_putobject(
 							}
 						}
 
-						part_shmem::part_size_map[upload_id][part_number_int] = part_size;
+						mpart_global_state::part_size_map[upload_id][part_number_int] = part_size;
 					}
 				}
 				else {
@@ -526,9 +494,10 @@ void irods::s3::actions::handle_putobject(
 
 					// Make sure someone hasn't previously uploaded this part with a different part size.
 					// If so we can't handle that and have to reject the call.
-					if (part_shmem::part_size_map[upload_id].find(part_number_int) !=
-					    part_shmem::part_size_map[upload_id].end()) {
-						auto old_part_size = part_shmem::part_size_map[upload_id][part_number_int];
+					if (mpart_global_state::part_size_map[upload_id].find(part_number_int) !=
+					    mpart_global_state::part_size_map[upload_id].end())
+					{
+						auto old_part_size = mpart_global_state::part_size_map[upload_id][part_number_int];
 						if (old_part_size != part_size) {
 							// reject this
 							logging::error(
@@ -548,14 +517,15 @@ void irods::s3::actions::handle_putobject(
 						}
 					}
 
-					part_shmem::part_size_map[upload_id][part_number_int] = part_size;
+					mpart_global_state::part_size_map[upload_id][part_number_int] = part_size;
 				}
 
 				// see if we know all of the previous part_sizes
 				know_part_offset = true;
 				for (unsigned int i = 1; i <= part_number_int - 1; ++i) {
-					if (part_shmem::part_size_map[upload_id].find(i) != part_shmem::part_size_map[upload_id].end()) {
-						part_offset += part_shmem::part_size_map[upload_id][i];
+					if (mpart_global_state::part_size_map[upload_id].find(i) !=
+					    mpart_global_state::part_size_map[upload_id].end()) {
+						part_offset += mpart_global_state::part_size_map[upload_id][i];
 					}
 					else {
 						know_part_offset = false;
@@ -654,11 +624,11 @@ void irods::s3::actions::handle_putobject(
 
 		if (upload_part && know_part_offset) {
 			{
-				std::lock_guard<std::mutex> guard(part_shmem::multipart_global_state_mutex);
+				std::lock_guard<std::mutex> guard(mpart_global_state::multipart_global_state_mutex);
 
 				// if there is no replica token then just open the object without replica token and save the token
-				if (part_shmem::replica_token_number_and_odstream_map.find(upload_id) ==
-				    part_shmem::replica_token_number_and_odstream_map.end())
+				if (mpart_global_state::replica_token_number_and_odstream_map.find(upload_id) ==
+				    mpart_global_state::replica_token_number_and_odstream_map.end())
 				{
 					logging::trace(
 						"{}: Open new iRODS data object [{}] for writing and seeking to {}.",
@@ -672,7 +642,7 @@ void irods::s3::actions::handle_putobject(
 						std::ios::out | std::ios::trunc);
 					if (d->is_open()) {
 						keep_dstream_open_flag = true;
-						part_shmem::replica_token_number_and_odstream_map[upload_id] = {
+						mpart_global_state::replica_token_number_and_odstream_map[upload_id] = {
 							d->replica_token(), d->replica_number(), conn, tp, d};
 					}
 				}
@@ -685,9 +655,11 @@ void irods::s3::actions::handle_putobject(
 						part_offset);
 					d->open(
 						*tp,
-						std::get<0>(part_shmem::replica_token_number_and_odstream_map[upload_id]), // replica token
+						std::get<0>(
+							mpart_global_state::replica_token_number_and_odstream_map[upload_id]), // replica token
 						path,
-						std::get<1>(part_shmem::replica_token_number_and_odstream_map[upload_id]), // replica number
+						std::get<1>(
+							mpart_global_state::replica_token_number_and_odstream_map[upload_id]), // replica number
 						std::ios::out | std::ios::in);
 				}
 			}
