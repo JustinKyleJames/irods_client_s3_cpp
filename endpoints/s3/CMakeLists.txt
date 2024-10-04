@@ -1,6 +1,7 @@
 add_library(
   irods_s3_endpoints
   OBJECT
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/multipart_global_state.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/listobjects.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/listbuckets.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/getobject.cpp"

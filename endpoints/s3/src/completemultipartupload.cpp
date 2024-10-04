@@ -36,25 +36,8 @@ namespace beast = boost::beast;
 namespace fs = irods::experimental::filesystem;
 namespace logging = irods::http::logging;
 
-namespace irods::s3::api::multipart_global_state
-{
-	extern std::unordered_map<std::string, std::unordered_map<unsigned int, uint64_t>> part_size_map;
-	extern std::unordered_map<
-		std::string,
-		std::tuple<
-			irods::experimental::io::replica_token,
-			irods::experimental::io::replica_number,
-			std::shared_ptr<irods::experimental::client_connection>,
-			std::shared_ptr<irods::experimental::io::client::native_transport>,
-			std::shared_ptr<irods::experimental::io::odstream>>>
-		replica_token_number_and_odstream_map;
-
-	extern std::mutex multipart_global_state_mutex;
-} // end namespace irods::s3::api::multipart_global_state
-
 namespace
 {
-
 	std::regex upload_id_pattern("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
 
 	// store offsets and lengths for each part
@@ -78,7 +61,7 @@ void irods::s3::actions::handle_completemultipartupload(
 	boost::beast::http::request_parser<boost::beast::http::empty_body>& empty_body_parser,
 	const boost::urls::url_view& url)
 {
-	namespace part_shmem = irods::s3::api::multipart_global_state;
+	namespace mpart_global_state = irods::s3::api::multipart_global_state;
 
 	beast::http::response<beast::http::empty_body> response;
 
@@ -136,6 +119,31 @@ void irods::s3::actions::handle_completemultipartupload(
 		logging::debug("{}: returned [{}]", __func__, response.reason());
 		session_ptr->send(std::move(response));
 		return;
+	}
+
+	// Make sure the key we have matches the key in memory for this upload_id.
+	// Reject the request if these do not match. If there is none in memory just
+	// continue.
+	{
+		std::lock_guard<std::mutex> guard(mpart_global_state::multipart_global_state_mutex);
+
+		auto& key_to_upload_id_bimap = mpart_global_state::object_key_to_upload_ids_bimap[s3_bucket.string()];
+
+		if (key_to_upload_id_bimap.right.find(upload_id) != key_to_upload_id_bimap.right.end()) {
+			auto expected_key = key_to_upload_id_bimap.right.at(upload_id);
+			if (expected_key != s3_key.string()) {
+				logging::error(
+					"{}: Upload ID [{}]: Key mismatch. Expected key [{}]. Received key [{}].",
+					__func__,
+					upload_id,
+					expected_key,
+					s3_key.string());
+				response.result(beast::http::status::bad_request);
+				logging::debug("{}: returned [{}]", __func__, response.reason());
+				session_ptr->send(std::move(response));
+				return;
+			}
+		}
 	}
 
 	// Do not allow an upload_id that is not in the format we have defined. People could do bad things
@@ -223,16 +231,22 @@ void irods::s3::actions::handle_completemultipartupload(
 
 	// debug
 	if (spdlog::get_level() == spdlog::level::debug || spdlog::get_level() == spdlog::level::trace) {
-		std::lock_guard<std::mutex> guard(part_shmem::multipart_global_state_mutex);
+		std::lock_guard<std::mutex> guard(mpart_global_state::multipart_global_state_mutex);
 		logging::info("{}:{} {}: ******* THIS RAN ********", __FILE__, __LINE__, __func__);
 
-		if (part_shmem::part_size_map.find(upload_id) != part_shmem::part_size_map.end()) {
+		if (mpart_global_state::part_size_map.find(upload_id) != mpart_global_state::part_size_map.end()) {
 			logging::debug("{}:{} {}: ------------------", __FILE__, __LINE__, __func__);
 			for (int i = 1; i <= part_number_count; ++i) {
-				bool found = part_shmem::part_size_map[upload_id].find(i) != part_shmem::part_size_map[upload_id].end();
+				bool found = mpart_global_state::part_size_map[upload_id].find(i) !=
+				             mpart_global_state::part_size_map[upload_id].end();
 				if (found) {
 					logging::debug(
-						"{}:{} {}: {}: {}", __FILE__, __LINE__, __func__, i, part_shmem::part_size_map[upload_id][i]);
+						"{}:{} {}: {}: {}",
+						__FILE__,
+						__LINE__,
+						__func__,
+						i,
+						mpart_global_state::part_size_map[upload_id][i]);
 				}
 				else {
 					logging::debug("{}:{} {}: {}: UNKNOWN", __FILE__, __LINE__, __func__, i);
@@ -252,18 +266,18 @@ void irods::s3::actions::handle_completemultipartupload(
 		config.value(nlohmann::json::json_pointer{"/s3_server/multipart_upload_part_files_directory"}, ".");
 
 	{
-		std::lock_guard<std::mutex> guard(part_shmem::multipart_global_state_mutex);
+		std::lock_guard<std::mutex> guard(mpart_global_state::multipart_global_state_mutex);
 		uint64_t offset_counter = 0;
 		for (int current_part_number = 1; current_part_number <= max_part_number; ++current_part_number) {
 			std::string part_filename =
 				part_file_location + "/irods_s3_api_" + upload_id + "." + std::to_string(current_part_number);
 
-			if (part_shmem::part_size_map.find(upload_id) != part_shmem::part_size_map.end() &&
-			    part_shmem::part_size_map[upload_id].find(current_part_number) !=
-			        part_shmem::part_size_map[upload_id].end())
+			if (mpart_global_state::part_size_map.find(upload_id) != mpart_global_state::part_size_map.end() &&
+			    mpart_global_state::part_size_map[upload_id].find(current_part_number) !=
+			        mpart_global_state::part_size_map[upload_id].end())
 			{
 				// get size from part_size_map in shmem
-				auto part_size = part_shmem::part_size_map[upload_id][current_part_number];
+				auto part_size = mpart_global_state::part_size_map[upload_id][current_part_number];
 				part_info_vector.push_back({part_filename, offset_counter, part_size});
 				offset_counter += part_size;
 			}
@@ -292,8 +306,8 @@ void irods::s3::actions::handle_completemultipartupload(
 	std::mutex cv_mutex;
 
 	// get the replica_token and replica_number from replica_token_number_and_odstream_map
-	const auto& replica_token = std::get<0>(part_shmem::replica_token_number_and_odstream_map[upload_id]);
-	const auto& replica_number = std::get<1>(part_shmem::replica_token_number_and_odstream_map[upload_id]);
+	const auto& replica_token = std::get<0>(mpart_global_state::replica_token_number_and_odstream_map[upload_id]);
+	const auto& replica_number = std::get<1>(mpart_global_state::replica_token_number_and_odstream_map[upload_id]);
 
 	// start tasks on thread pool for part uploads
 	for (int current_part_number = 1; current_part_number <= max_part_number; ++current_part_number) {
@@ -440,14 +454,14 @@ void irods::s3::actions::handle_completemultipartupload(
 	});
 
 	// close the object and delete the entry in the replica_token_number_and_odstream_map
-	if (part_shmem::replica_token_number_and_odstream_map.find(upload_id) !=
-	    part_shmem::replica_token_number_and_odstream_map.end())
+	if (mpart_global_state::replica_token_number_and_odstream_map.find(upload_id) !=
+	    mpart_global_state::replica_token_number_and_odstream_map.end())
 	{
 		// Read all of the shared pointers in the tuple to make sure they are destructed in
 		// the order we require. std::tuple does not guarantee order of destruction.
-		auto conn_ptr = std::get<2>(part_shmem::replica_token_number_and_odstream_map[upload_id]);
-		auto transport_ptr = std::get<3>(part_shmem::replica_token_number_and_odstream_map[upload_id]);
-		auto dstream_ptr = std::get<4>(part_shmem::replica_token_number_and_odstream_map[upload_id]);
+		auto conn_ptr = std::get<2>(mpart_global_state::replica_token_number_and_odstream_map[upload_id]);
+		auto transport_ptr = std::get<3>(mpart_global_state::replica_token_number_and_odstream_map[upload_id]);
+		auto dstream_ptr = std::get<4>(mpart_global_state::replica_token_number_and_odstream_map[upload_id]);
 
 		logging::trace("{}:{} Closing iRODS data object.", __func__, __LINE__);
 		if (dstream_ptr) {
@@ -455,7 +469,7 @@ void irods::s3::actions::handle_completemultipartupload(
 		}
 
 		// delete the entry
-		part_shmem::replica_token_number_and_odstream_map.erase(upload_id);
+		mpart_global_state::replica_token_number_and_odstream_map.erase(upload_id);
 	}
 
 	// check to see if any threads failed
@@ -474,8 +488,11 @@ void irods::s3::actions::handle_completemultipartupload(
 
 	// clean up shmem - on failures we don't want to clean up as this could be resent
 	{
-		std::lock_guard<std::mutex> guard(part_shmem::multipart_global_state_mutex);
-		part_shmem::part_size_map.erase(upload_id);
+		std::lock_guard<std::mutex> guard(mpart_global_state::multipart_global_state_mutex);
+		mpart_global_state::part_size_map.erase(upload_id);
+
+		auto& key_to_upload_id_bimap = mpart_global_state::object_key_to_upload_ids_bimap[s3_bucket.string()];
+		key_to_upload_id_bimap.right.erase(upload_id);
 	}
 
 	// Now send the response
@@ -497,7 +514,7 @@ void irods::s3::actions::handle_completemultipartupload(
 
 	document.add("CompleteMultipartUploadResult.Location", s3_region);
 	document.add("CompleteMultipartUploadResult.Bucket", s3_bucket.string());
-	document.add("CompleteMultipartUploadResult.Key", s3_key);
+	document.add("CompleteMultipartUploadResult.Key", s3_key.string());
 	document.add("CompleteMultipartUploadResult.ETag", "TBD");
 
 	boost::property_tree::write_xml(s, document, settings);

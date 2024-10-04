@@ -38,22 +38,6 @@ namespace beast = boost::beast;
 namespace fs = irods::experimental::filesystem;
 namespace logging = irods::http::logging;
 
-namespace irods::s3::api::multipart_global_state
-{
-	extern std::unordered_map<std::string, std::unordered_map<unsigned int, uint64_t>> part_size_map;
-	extern std::unordered_map<
-		std::string,
-		std::tuple<
-			irods::experimental::io::replica_token,
-			irods::experimental::io::replica_number,
-			std::shared_ptr<irods::experimental::client_connection>,
-			std::shared_ptr<irods::experimental::io::client::native_transport>,
-			std::shared_ptr<irods::experimental::io::odstream>>>
-		replica_token_number_and_odstream_map;
-
-	extern std::mutex multipart_global_state_mutex;
-} // end namespace irods::s3::api::multipart_global_state
-
 namespace
 {
 
@@ -80,7 +64,7 @@ void irods::s3::actions::handle_abortmultipartupload(
 	boost::beast::http::request_parser<boost::beast::http::empty_body>& empty_body_parser,
 	const boost::urls::url_view& url)
 {
-	namespace part_shmem = irods::s3::api::multipart_global_state;
+	namespace mpart_global_state = irods::s3::api::multipart_global_state;
 
 	beast::http::response<beast::http::empty_body> response;
 	response.result(beast::http::status::ok);
@@ -96,6 +80,12 @@ void irods::s3::actions::handle_abortmultipartupload(
 	}
 
 	auto conn = irods::get_connection(*irods_username);
+
+	std::filesystem::path s3_bucket;
+	for (auto seg : url.encoded_segments()) {
+		s3_bucket = seg.decode();
+		break;
+	}
 
 	fs::path path;
 	if (auto bucket = irods::s3::resolve_bucket(url.segments()); bucket.has_value()) {
@@ -136,20 +126,20 @@ void irods::s3::actions::handle_abortmultipartupload(
 	}
 
 	// delete the entry in the replica_token_number_and_odstream_map
-	if (part_shmem::replica_token_number_and_odstream_map.find(upload_id) !=
-	    part_shmem::replica_token_number_and_odstream_map.end())
+	if (mpart_global_state::replica_token_number_and_odstream_map.find(upload_id) !=
+	    mpart_global_state::replica_token_number_and_odstream_map.end())
 	{
 		// Read all of the shared pointers in the tuple to make sure they are destructed in
 		// the order we require. std::tuple does not guarantee order of destruction.
-		auto conn_ptr = std::get<2>(part_shmem::replica_token_number_and_odstream_map[upload_id]);
-		auto transport_ptr = std::get<3>(part_shmem::replica_token_number_and_odstream_map[upload_id]);
-		auto dstream_ptr = std::get<4>(part_shmem::replica_token_number_and_odstream_map[upload_id]);
+		auto conn_ptr = std::get<2>(mpart_global_state::replica_token_number_and_odstream_map[upload_id]);
+		auto transport_ptr = std::get<3>(mpart_global_state::replica_token_number_and_odstream_map[upload_id]);
+		auto dstream_ptr = std::get<4>(mpart_global_state::replica_token_number_and_odstream_map[upload_id]);
 		if (dstream_ptr) {
 			dstream_ptr->close();
 		}
 
 		// delete the entry
-		part_shmem::replica_token_number_and_odstream_map.erase(upload_id);
+		mpart_global_state::replica_token_number_and_odstream_map.erase(upload_id);
 	}
 
 	// get the base location for the part files
@@ -188,8 +178,11 @@ void irods::s3::actions::handle_abortmultipartupload(
 
 	// clean up shmem - on failures we don't want to clean up as this could be resent
 	{
-		std::lock_guard<std::mutex> guard(part_shmem::multipart_global_state_mutex);
-		part_shmem::part_size_map.erase(upload_id);
+		std::lock_guard<std::mutex> guard(mpart_global_state::multipart_global_state_mutex);
+		mpart_global_state::part_size_map.erase(upload_id);
+
+		auto& key_to_upload_id_bimap = mpart_global_state::object_key_to_upload_ids_bimap[s3_bucket.string()];
+		key_to_upload_id_bimap.right.erase(upload_id);
 	}
 
 	logging::debug("{}: returned [{}]", __func__, response.reason());

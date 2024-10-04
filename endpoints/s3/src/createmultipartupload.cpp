@@ -10,6 +10,7 @@
 
 #include <irods/irods_exception.hpp>
 
+#include <boost/bimap.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
@@ -29,6 +30,8 @@ void irods::s3::actions::handle_createmultipartupload(
 	boost::beast::http::request_parser<boost::beast::http::empty_body>& parser,
 	const boost::urls::url_view& url)
 {
+	namespace mpart_global_state = irods::s3::api::multipart_global_state;
+
 	beast::http::response<beast::http::empty_body> response;
 
 	// Authenticate
@@ -78,6 +81,37 @@ void irods::s3::actions::handle_createmultipartupload(
 
 	// create the UploadId
 	std::string upload_id = boost::lexical_cast<std::string>(boost::uuids::random_generator()());
+
+	// Update object_key_to_upload_ids_bimap.
+	// Make sure that there is not already an open request for this path.
+	// If there is, reject this request. If not create a new entry for it and continue.
+	{
+		std::lock_guard<std::mutex> guard(mpart_global_state::multipart_global_state_mutex);
+
+		// if an entry does not exist for this bucket in object_key_to_upload_ids_bimap, go ahead and create it
+		if (mpart_global_state::object_key_to_upload_ids_bimap.find(s3_bucket.string()) ==
+		    mpart_global_state::object_key_to_upload_ids_bimap.end())
+		{
+			mpart_global_state::object_key_to_upload_ids_bimap[s3_bucket.string()] =
+				boost::bimap<std::string, std::string>();
+		}
+
+		auto& key_to_upload_id_bimap = mpart_global_state::object_key_to_upload_ids_bimap[s3_bucket.string()];
+
+		if (key_to_upload_id_bimap.left.find(s3_key.string()) != key_to_upload_id_bimap.left.end()) {
+			auto existing_upload_id = key_to_upload_id_bimap.left.at(s3_key.string());
+			logging::error(
+				"{}: There is already an open upload ID [{}] open for key [{}]. Rejecting this request.",
+				__func__,
+				existing_upload_id,
+				s3_key.string());
+			response.result(beast::http::status::bad_request);
+			logging::debug("{}: returned [{}]", __func__, response.reason());
+			session_ptr->send(std::move(response));
+			return;
+		}
+		key_to_upload_id_bimap.insert({s3_key.string(), upload_id});
+	}
 
 	boost::property_tree::ptree document;
 	document.add("InitiateMultipartUploadResult", "");
