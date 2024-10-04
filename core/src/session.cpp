@@ -211,6 +211,18 @@ namespace irods::http
 							irods::s3::actions::handle_listparts(shared_this, *parser, url_view);
 						});
 					}
+					else if (params.find("uploads") != params.end()) {
+						logging::debug("{}: ListMultipartUploads detected", __func__);
+						auto shared_this = shared_from_this();
+
+						irods::http::globals::background_task([shared_this, &parser = this->parser_]() mutable {
+							// build the url_view - must be done within background task as url_view is not copyable
+							boost::urls::url url;
+							get_url_from_parser(*parser, url);
+							boost::urls::url_view url_view = url;
+							irods::s3::actions::handle_listmultipartuploads(shared_this, *parser, url_view);
+						});
+					}
 					else {
 						logging::debug("{}: GetObject detected", __func__);
 						auto shared_this = shared_from_this();

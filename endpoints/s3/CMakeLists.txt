@@ -15,6 +15,7 @@ add_library(
   "${CMAKE_CURRENT_SOURCE_DIR}/src/completemultipartupload.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/abortmultipartupload.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/listparts.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/listmultipartuploads.cpp"
 )
 
 target_compile_definitions(
