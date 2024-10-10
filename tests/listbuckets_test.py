@@ -1,10 +1,8 @@
-from unittest import *
+from unittest import TestCase
 import botocore
 import botocore.session
 import os
-from libs.execute import *
-from libs.command import *
-from libs.utility import *
+from libs.command import assert_command
 from datetime import datetime
 from host_port import s3_api_host_port
 

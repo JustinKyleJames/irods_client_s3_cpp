@@ -1,11 +1,10 @@
-import unittest
+from unittest import TestCase
 import boto3
 from boto3.s3.transfer import TransferConfig
 import inspect
 import os
-from libs.execute import *
-from libs.command import *
-from libs.utility import *
+from libs.command import assert_command
+from libs.utility import make_arbitrary_file
 from datetime import datetime
 from minio import Minio
 from host_port import s3_api_host_port
