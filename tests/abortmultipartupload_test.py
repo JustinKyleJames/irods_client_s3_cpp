@@ -2,9 +2,8 @@ from unittest import *
 import inspect
 import os
 import json
-from libs.execute import *
-from libs.command import *
-from libs.utility import *
+from libs.command import assert_command
+from libs.utility import make_arbitrary_file
 from host_port import s3_api_host_port, irods_host
 
 class AbortMultipartUpload_Test(TestCase):
@@ -47,7 +46,7 @@ class AbortMultipartUpload_Test(TestCase):
             assert_command(f'aws --profile s3_api_alice --endpoint-url {self.s3_api_url} '
                     f's3api abort-multipart-upload --bucket {self.bucket_name} --key {put_filename} --upload-id {upload_id}')
 
-            # Put the object. Without the fix for 130 this would fail as the stream remains open
+            # Put the object. Without the fix for issue 130 this would fail as the stream remains open
             assert_command(f'aws --profile s3_api_alice --endpoint-url {self.s3_api_url} '
                     f's3 cp {part_filename} s3://{self.bucket_name}/{put_filename}',
                     'STDOUT_SINGLELINE',
