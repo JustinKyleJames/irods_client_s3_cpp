@@ -1,11 +1,8 @@
-from unittest import *
+from unittest import TestCase
 import boto3
 import botocore
 import inspect
 import os
-from libs.execute import *
-from libs.command import *
-from libs.utility import *
 from datetime import datetime
 from host_port import s3_api_host_port
 

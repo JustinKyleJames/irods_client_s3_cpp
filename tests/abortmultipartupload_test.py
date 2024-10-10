@@ -1,4 +1,4 @@
-from unittest import *
+from unittest import TestCase
 import inspect
 import os
 import json

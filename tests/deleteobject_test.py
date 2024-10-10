@@ -1,13 +1,12 @@
-from unittest import *
+from unittest import TestCase
 import boto3
 from boto3.s3.transfer import TransferConfig
 import botocore
 import botocore.session
 import inspect
 import os
-from libs.execute import *
-from libs.command import *
-from libs.utility import *
+from libs.command import assert_command, assert_command_fail
+from libs.utility import make_arbitrary_file, execute_irods_command_as_user
 from datetime import datetime
 from host_port import s3_api_host_port, irods_host
 
